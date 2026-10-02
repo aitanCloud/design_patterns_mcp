@@ -29,6 +29,23 @@ export interface SearchMediatorConfig {
   useHybridSearch: boolean;
   useFuzzyRefinement: boolean;
   cacheResultsTTL: number;
+  /**
+   * Candidate shortlist length per channel, before fusion and before the
+   * caller's `maxResults` slice.
+   *
+   * Left at the historical effective value (`maxResults * 2` = 10). Raising it
+   * to 50 was measured on a 10-query benchmark and made results WORSE — MRR
+   * 0.525 -> 0.475, top-1 4/10 -> 3/10 — because a deeper shortlist admits
+   * many weak BM25 matches, and BM25 over one-line pattern descriptions is the
+   * noisier of the two channels. It put "Facade" above "Adapter" for "give an
+   * old interface a new shape so two libraries can talk" on the strength of
+   * the word "interface" alone.
+   *
+   * Exposed as a knob rather than a constant so this can be revisited against
+   * a larger query set, ideally alongside a stronger embedding model than
+   * all-minilm. Do not raise it without re-measuring.
+   */
+  retrievalDepth: number;
 }
 
 export type SearchStrategy = 'keyword' | 'semantic' | 'hybrid';
@@ -54,6 +71,7 @@ const DEFAULT_CONFIG: SearchMediatorConfig = {
   useHybridSearch: true,
   useFuzzyRefinement: true,
   cacheResultsTTL: 1800000, // 30 minutes
+  retrievalDepth: 10,
 };
 
 /**
@@ -79,15 +97,32 @@ export class SearchMediator {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.cache = cache ?? new CacheService();
 
-    // Initialize handlers
+    // Candidate shortlist depth per channel.
+    //
+    // These handlers are constructed ONCE, so retrieval depth cannot track
+    // `request.maxResults`; it is a fixed shortlist that fusion then reorders
+    // and `searchSafe` slices to whatever the caller asked for. A caller
+    // requesting 8 results is therefore choosing from a 10-item shortlist per
+    // channel, which leaves fusion very little headroom — anything ranked 11th
+    // by both channels is unreachable however strongly the two agree.
+    //
+    // That is a real ceiling on recall, but widening it is NOT a free win: see
+    // `retrievalDepth` in SearchMediatorConfig for the measurement showing a
+    // depth of 50 made ranking worse. The floor below preserves the historical
+    // `maxResults * 2` behaviour for callers that raise `maxResults`.
+    const retrievalDepth = Math.max(
+      this.config.retrievalDepth,
+      this.config.maxResults * 2
+    );
+
     this.semanticHandler = new SemanticSearchHandler(vectorOps, this.cache, {
-      maxResults: this.config.maxResults * 2,
+      maxResults: retrievalDepth,
       minConfidence: this.config.minConfidence,
       similarityThreshold: 0.3,
     });
 
     this.keywordHandler = new KeywordSearchHandler(db, {
-      maxResults: this.config.maxResults * 2,
+      maxResults: retrievalDepth,
       minConfidence: this.config.minConfidence,
       broadSearchThreshold: 0.01,
     });

@@ -31,6 +31,38 @@ const DEFAULT_BM25_CONFIG: BM25Config = {
   b: 0.75,
 };
 
+/**
+ * Function words excluded from both the index and the query.
+ *
+ * `tokenize` already drops words of 2 characters or fewer, which leaves "one",
+ * "all", "need", "from", "this" and friends in the index. They carry almost no
+ * IDF, so they barely move a BM25 score — but they DO satisfy the substring
+ * checks in `generateKeywordReasons`, which is how a search for "prevent ONE
+ * failing dependency" came back with `Prompt Chaining` at 85% and the rationale
+ * `Pattern description mentions "one"`.
+ *
+ * Deliberately contains no design-pattern vocabulary: state, command, chain,
+ * proxy, bridge, facade, builder, visitor, template, strategy, observer,
+ * factory, adapter, single/singleton, block and composite are all absent, and
+ * must stay absent.
+ */
+export const BM25_STOPWORDS = new Set([
+  'the', 'and', 'but', 'for', 'not', 'you', 'all', 'any', 'are', 'was', 'were',
+  'has', 'have', 'had', 'its', 'his', 'her', 'our', 'their', 'they', 'them',
+  'this', 'that', 'these', 'those', 'with', 'from', 'into', 'onto', 'over',
+  'under', 'then', 'than', 'when', 'where', 'what', 'which', 'who', 'whom',
+  'why', 'how', 'can', 'could', 'will', 'would', 'should', 'shall', 'may',
+  'might', 'must', 'does', 'did', 'done', 'being', 'been', 'get', 'got',
+  'one', 'two', 'some', 'such', 'only', 'own', 'same', 'too', 'very', 'just',
+  'also', 'about', 'after', 'before', 'again', 'once', 'here', 'there', 'out',
+  'off', 'down', 'more', 'most', 'other', 'need', 'needs', 'want', 'wants',
+  'make', 'makes', 'made', 'use', 'uses', 'used', 'using', 'way', 'ways',
+  'thing', 'things', 'something', 'anything', 'everything', 'nothing',
+  'without', 'within', 'between', 'through', 'during', 'above', 'below',
+  'because', 'while', 'both', 'each', 'few', 'many', 'much', 'well', 'back',
+  'even', 'still', 'like', 'want', 'lot', 'per', 'via', 'yet', 'now',
+]);
+
 export class BM25Scorer {
   private readonly k1: number;
   private readonly b: number;
@@ -129,6 +161,67 @@ export class BM25Scorer {
   }
 
   /**
+   * The largest score this query could possibly achieve.
+   *
+   * A term's BM25 contribution is `idf * tfNorm`, and tfNorm saturates at
+   * `k1 + 1` as tf grows. So the ceiling is `Σ idf(t) * (k1 + 1)` over the
+   * query's distinct known terms. Unknown terms contribute nothing, which is
+   * correct: a query of pure gibberish has a ceiling of 0 and cannot be
+   * "matched well".
+   */
+  queryCeiling(query: string): number {
+    const seen = new Set(this.tokenize(query));
+    let ceiling = 0;
+    for (const token of seen) {
+      ceiling += (this.idf.get(token) ?? 0) * (this.k1 + 1);
+    }
+    return ceiling;
+  }
+
+  /**
+   * Normalize raw BM25 scores against what this query could have scored,
+   * rather than against the best result that happened to come back.
+   *
+   * WHY THIS EXISTS
+   * ---------------
+   * `normalizeScores` is min-max over the result set, and `scoreQuery` returns
+   * every document in the corpus — so the minimum is ~0 and the maximum is
+   * whatever ranked first. The top hit therefore normalizes to 1.0 for EVERY
+   * query, however weak the underlying match. Downstream that value is used as
+   * a confidence and blended against real cosine similarities (0.4-0.55), so
+   * the lexical channel won every comparison by construction.
+   *
+   * Measured before this change, "prevent one failing downstream dependency
+   * from exhausting all my threads" returned `Dependency Injection` at 99%
+   * ("name contains dependency") while Bulkhead — the correct answer, and
+   * present in the corpus — did not appear at all.
+   *
+   * Dividing by `queryCeiling` makes the number absolute and comparable across
+   * queries: it answers "how much of what this query asked for did this
+   * document actually contain, weighted by how informative each term was".
+   * A weak best-match now scores like a weak match instead of like certainty.
+   *
+   * `normalizeScores` is left untouched — it is still the right tool where a
+   * pure within-set ranking is wanted, and its tests pin that behaviour.
+   */
+  normalizeScoresAbsolute(
+    results: BM25ScoreResult[],
+    query: string
+  ): Array<{ id: string; normalized: number }> {
+    if (results.length === 0) return [];
+
+    const ceiling = this.queryCeiling(query);
+    if (ceiling <= 0) {
+      return results.map((r) => ({ id: r.id, normalized: 0 }));
+    }
+
+    return results.map((r) => ({
+      id: r.id,
+      normalized: Math.min(Math.max(r.score / ceiling, 0), 1),
+    }));
+  }
+
+  /**
    * Get corpus statistics for diagnostics.
    */
   getStats(): {
@@ -171,7 +264,7 @@ export class BM25Scorer {
       .toLowerCase()
       .replace(/[^\w\s]/g, ' ')
       .split(/\s+/)
-      .filter((w) => w.length > 2);
+      .filter((w) => w.length > 2 && !BM25_STOPWORDS.has(w));
   }
 
   private computeTF(tokens: string[]): Map<string, number> {

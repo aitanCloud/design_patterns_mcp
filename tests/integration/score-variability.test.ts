@@ -6,8 +6,25 @@
  *
  * Acceptance criteria:
  *   - CV (coefficient of variation) ≥ 0.30 for top-10 results
- *   - Spread (max - min) ≥ 0.50 for top-10 results
+ *   - Spread (max - min) ≥ 0.15 for top-10 results
  *   - Top-1 != Top-2 in ≥ 7/10 queries
+ *
+ * SPREAD THRESHOLD, lowered 0.50 → 0.15 alongside the switch to
+ * BM25Scorer.normalizeScoresAbsolute.
+ *
+ * The old threshold could not fail. `normalizeScores` is min-max over the
+ * result set, and `scoreQuery` returns the whole corpus — so the top result
+ * normalized to 1.0 and the tail to ~0.0 for EVERY query, making a spread
+ * near 1.0 a property of the normalizer rather than evidence that the ranker
+ * discriminates. It measured the instrument, not the signal.
+ *
+ * Absolute normalization scores against what the query could have achieved,
+ * so the numbers are smaller and honest: measured avgSpread is 0.274 where
+ * the guaranteed-by-construction value used to be ~0.9. 0.15 still fails a
+ * genuinely degenerate ranker that returns ten near-identical scores.
+ *
+ * CV is deliberately left at 0.30. It is scale-invariant (σ/μ), so it was
+ * always the meaningful half of this test, and it still passes unchanged.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { DatabaseManager } from '../../src/services/database-manager.js';
@@ -104,7 +121,7 @@ describe('Score Variability Measurement', () => {
 
     // Acceptance criteria
     expect(avgCV).toBeGreaterThanOrEqual(0.30);
-    expect(avgSpread).toBeGreaterThanOrEqual(0.50);
+    expect(avgSpread).toBeGreaterThanOrEqual(0.15);
     expect(topDifferentRate).toBeGreaterThanOrEqual(0.70);
   });
 

@@ -2,7 +2,7 @@
  * Unit Tests for BM25 Scorer
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { BM25Scorer } from '../../src/services/bm25-scorer.js';
+import { BM25Scorer, BM25_STOPWORDS } from '../../src/services/bm25-scorer.js';
 import type { BM25Document } from '../../src/services/bm25-scorer.js';
 
 describe('BM25Scorer', () => {
@@ -101,6 +101,75 @@ describe('BM25Scorer', () => {
     it('should return 0 for non-matching terms', () => {
       const score = scorer.scoreDocumentByIndex('xyznonexistent', 0);
       expect(score).toBe(0);
+    });
+  });
+
+  describe('stopwords', () => {
+    it('should exclude function words from the index', () => {
+      // "one" appears in the observer and singleton documents. Before it was a
+      // stopword, a query containing it matched them and produced the rationale
+      // `Pattern description mentions "one"`.
+      expect(scorer.scoreDocumentByIndex('one', 2)).toBe(0);
+      expect(scorer.scoreDocumentByIndex('one', 5)).toBe(0);
+    });
+
+    it('should not treat design-pattern vocabulary as stopwords', () => {
+      // Regression guard: these words are load-bearing in this corpus. Adding
+      // any of them to BM25_STOPWORDS would silently make the pattern
+      // unfindable by name.
+      for (const word of [
+        'state', 'command', 'chain', 'proxy', 'bridge', 'facade', 'builder',
+        'visitor', 'template', 'strategy', 'observer', 'factory', 'adapter',
+        'single', 'block', 'composite', 'object', 'interface',
+      ]) {
+        expect(BM25_STOPWORDS.has(word)).toBe(false);
+      }
+    });
+
+    it('should still rank a real term after stopword filtering', () => {
+      const results = scorer.scoreQuery('one observer notification');
+      expect(results[0].id).toBe('observer');
+      expect(results[0].score).toBeGreaterThan(0);
+    });
+  });
+
+  describe('normalizeScoresAbsolute', () => {
+    it('should NOT force the top result to 1.0', () => {
+      // This is the whole point. min-max normalization made the best hit 0.99
+      // for every query however weak, which then beat every real cosine
+      // similarity in the hybrid blend.
+      const weak = scorer.normalizeScoresAbsolute(
+        scorer.scoreQuery('observer'),
+        'observer'
+      );
+      const partial = scorer.normalizeScoresAbsolute(
+        scorer.scoreQuery('observer notification behavioral creational wrapper'),
+        'observer notification behavioral creational wrapper'
+      );
+      expect(partial[0].normalized).toBeLessThan(weak[0].normalized);
+      expect(partial[0].normalized).toBeLessThan(1);
+    });
+
+    it('should score a query that matches nothing at zero', () => {
+      const results = scorer.normalizeScoresAbsolute(
+        scorer.scoreQuery('zzzznonexistentterm'),
+        'zzzznonexistentterm'
+      );
+      expect(results.every((r) => r.normalized === 0)).toBe(true);
+    });
+
+    it('should stay within 0-1 and preserve ranking order', () => {
+      const raw = scorer.scoreQuery('factory pattern');
+      const norm = scorer.normalizeScoresAbsolute(raw, 'factory pattern');
+      expect(norm.map((r) => r.id)).toEqual(raw.map((r) => r.id));
+      for (const r of norm) {
+        expect(r.normalized).toBeGreaterThanOrEqual(0);
+        expect(r.normalized).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('should return an empty array for no results', () => {
+      expect(scorer.normalizeScoresAbsolute([], 'anything')).toEqual([]);
     });
   });
 

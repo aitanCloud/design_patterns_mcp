@@ -223,7 +223,38 @@ export class HybridSearchCombiner {
   }
 
   /**
-   * Combine semantic and keyword matches using hybrid scoring
+   * Combine semantic and keyword matches using hybrid scoring.
+   *
+   * MISSING-CHANNEL IMPUTATION — why this is not a plain weighted average
+   * --------------------------------------------------------------------
+   * Each handler returns only its own top-k, so a pattern can be absent from
+   * one channel's results for two very different reasons: it genuinely scored
+   * nothing there, or it scored just below that channel's cutoff. Absence is
+   * missing evidence, not evidence of absence.
+   *
+   * The original code resolved this by passing a single-channel match through
+   * at its FULL unweighted score, while a pattern found by both channels got
+   * the weighted average. Since a weighted average never exceeds the larger of
+   * its inputs, that made corroboration a penalty: a pattern that both channels
+   * agreed on scored BELOW one that only a single channel had ranked highly.
+   *
+   * Measured over a 10-query set before this change, every result in every
+   * top-8 came from the single-channel branch — the keyword channel could not
+   * place a single pattern, because matching on keywords could only ever drag a
+   * score down. Circuit Breaker and Bulkhead both ranked in the keyword top-8
+   * for "prevent one failing downstream dependency from exhausting all my
+   * threads" and neither reached the final top-5.
+   *
+   * Instead we impute the missing channel as the WORST score that channel
+   * actually returned. A pattern that missed the cutoff scored no better than
+   * the weakest result that made it, so this is a bounded, slightly generous
+   * estimate rather than a punitive zero — and every pattern is then scored on
+   * the same scale, so agreement between channels raises a pattern instead of
+   * lowering it.
+   *
+   * A channel that contributed no matches at all (a single-strategy search, or
+   * one that errored) is dropped from the blend entirely and the weights are
+   * renormalized over what remains. Imputing there would invent evidence.
    */
   combineMatches(matches: MatchResult[], alphaResult?: DynamicAlphaResult): MatchResult[] {
     const patternMap = new Map<string, MatchResult[]>();
@@ -236,28 +267,56 @@ export class HybridSearchCombiner {
 
     const combinedMatches: MatchResult[] = [];
 
-    const semanticWeight = alphaResult?.semanticAlpha ?? this.config.defaultSemanticWeight;
-    const keywordWeight = alphaResult?.keywordAlpha ?? this.config.defaultKeywordWeight;
+    let semanticWeight = alphaResult?.semanticAlpha ?? this.config.defaultSemanticWeight;
+    let keywordWeight = alphaResult?.keywordAlpha ?? this.config.defaultKeywordWeight;
+
+    // Floor for each channel: the weakest score it actually returned.
+    let semanticFloor = Number.POSITIVE_INFINITY;
+    let keywordFloor = Number.POSITIVE_INFINITY;
+
+    for (const match of matches) {
+      if (match.matchType === 'semantic') {
+        semanticFloor = Math.min(semanticFloor, match.metadata.semanticScore ?? 0);
+      } else if (match.matchType === 'keyword') {
+        keywordFloor = Math.min(keywordFloor, match.metadata.keywordScore ?? 0);
+      }
+    }
+
+    const hasSemanticChannel = Number.isFinite(semanticFloor);
+    const hasKeywordChannel = Number.isFinite(keywordFloor);
+
+    if (!hasSemanticChannel) semanticFloor = 0;
+    if (!hasKeywordChannel) keywordFloor = 0;
+
+    // Drop absent channels from the blend rather than imputing into them.
+    if (!hasSemanticChannel) semanticWeight = 0;
+    if (!hasKeywordChannel) keywordWeight = 0;
+
+    const weightSum = semanticWeight + keywordWeight;
 
     for (const [, patternMatches] of patternMap) {
       const semanticMatch = patternMatches.find((m) => m.matchType === 'semantic');
       const keywordMatch = patternMatches.find((m) => m.matchType === 'keyword');
 
+      // Reported scores stay as-observed (0 when the channel did not rank this
+      // pattern) so `metadata` keeps describing what actually happened. Only
+      // the blend uses the imputed floor.
       const semanticScore = semanticMatch?.metadata.semanticScore ?? 0;
-      const keywordScoreRaw = keywordMatch?.metadata.keywordScore ?? 0;
       // keywordScore is already normalized [0,1] from KeywordSearchHandler
       // (post-fix: result.normalized instead of raw BM25).
-      const keywordScore = Math.min(Math.max(keywordScoreRaw, 0), 0.99);
+      const keywordScore = Math.min(
+        Math.max(keywordMatch?.metadata.keywordScore ?? 0, 0),
+        1
+      );
+
+      const semanticForBlend = semanticMatch ? semanticScore : semanticFloor;
+      const keywordForBlend = keywordMatch ? keywordScore : keywordFloor;
 
       let finalScore = 0;
-      if (semanticScore > 0 && keywordScore > 0) {
+      if (weightSum > 0) {
         finalScore =
-          (semanticWeight * semanticScore + keywordWeight * keywordScore) /
-          (semanticWeight + keywordWeight);
-      } else if (semanticScore > 0) {
-        finalScore = semanticScore;
-      } else if (keywordScore > 0) {
-        finalScore = keywordScore;
+          (semanticWeight * semanticForBlend + keywordWeight * keywordForBlend) /
+          weightSum;
       }
 
       finalScore = Math.min(Math.max(finalScore, 0), 1);

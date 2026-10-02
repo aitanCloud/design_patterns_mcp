@@ -3,6 +3,7 @@
  * Matches user queries to appropriate design patterns using multiple strategies
  */
 import { DatabaseManager } from './database-manager.js';
+import { BM25_STOPWORDS } from './bm25-scorer.js';
 import { VectorOperationsService } from './vector-operations.js';
 import { PatternRecommendation, ImplementationGuidance, AlternativePattern } from '../models/recommendation.js';
 import { PatternAnalyzer } from './pattern-analyzer.js';
@@ -820,7 +821,10 @@ export class PatternMatcher {
   private generateKeywordReasons(queryWords: string[], pattern: PatternSummary): string[] {
     const reasons: string[] = [];
 
-    for (const word of queryWords) {
+    // Function words are filtered here as well as in BM25_STOPWORDS: callers
+    // pass their own tokenizations into this method, and a rationale reading
+    // `Pattern description mentions "one"` is worse than no rationale at all.
+    for (const word of queryWords.filter((w) => !BM25_STOPWORDS.has(w))) {
       if (pattern.name.toLowerCase().includes(word)) {
         reasons.push(`Pattern name contains "${word}"`);
       }

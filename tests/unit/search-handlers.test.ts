@@ -282,4 +282,114 @@ describe('HybridSearchCombiner', () => {
       expect(combined[0].confidence).toBeGreaterThanOrEqual(0);
     });
   });
+
+  describe('combineMatches — corroboration between channels', () => {
+    const pat = (id: string) => ({
+      id,
+      name: id,
+      category: 'Test',
+      description: 'Desc',
+    });
+
+    const semantic = (id: string, score: number): MatchResult => ({
+      pattern: pat(id),
+      confidence: score,
+      matchType: 'semantic',
+      reasons: [`semantic ${id}`],
+      metadata: { semanticScore: score, finalScore: score },
+    });
+
+    const keyword = (id: string, score: number): MatchResult => ({
+      pattern: pat(id),
+      confidence: score,
+      matchType: 'keyword',
+      reasons: [`keyword ${id}`],
+      metadata: { keywordScore: score, finalScore: score },
+    });
+
+    it('should rank a two-channel match above a single-channel match that scored higher in one channel', () => {
+      // THE REGRESSION THIS GUARDS
+      // --------------------------
+      // Previously a single-channel match passed through at its full score
+      // while a two-channel match got the weighted average — and an average
+      // never exceeds its larger input. So `agreed` below scored
+      // 0.7*0.55 + 0.3*0.50 = 0.535 and lost to `soloSemantic` at a flat 0.60,
+      // even though both channels independently ranked `agreed` well and only
+      // one channel had ever seen `soloSemantic`.
+      //
+      // Measured on a 10-query set, this made the keyword channel completely
+      // inert: every result in every top-8 came from the single-channel
+      // branch, because matching on keywords could only ever lower a score.
+      const combined = combiner.combineMatches([
+        semantic('agreed', 0.55),
+        keyword('agreed', 0.5),
+        semantic('soloSemantic', 0.6),
+        keyword('filler', 0.05),
+      ]);
+
+      const byId = new Map(combined.map((m) => [m.pattern.id, m.confidence]));
+      expect(byId.get('agreed')).toBeGreaterThan(byId.get('soloSemantic')!);
+    });
+
+    it('should impute a missing channel as that channel\'s weakest observed score, not zero', () => {
+      // `solo` is absent from the keyword list, so it is treated as having
+      // scored no better than the worst keyword result that did make the
+      // cut (0.10) — a bounded estimate rather than a punitive 0.
+      const combined = combiner.combineMatches([
+        semantic('solo', 0.8),
+        semantic('other', 0.4),
+        keyword('other', 0.1),
+      ]);
+
+      const solo = combined.find((m) => m.pattern.id === 'solo')!;
+
+      // With the default 0.7/0.3 split: 0.7*0.8 + 0.3*0.10 = 0.59.
+      // A punitive zero would give 0.56; full passthrough would give 0.80.
+      expect(solo.confidence).toBeCloseTo(0.59, 2);
+      expect(solo.confidence).toBeLessThan(0.8);
+    });
+
+    it('should not impute when a channel produced no results at all', () => {
+      // Single-strategy search: the keyword channel never ran, so it must be
+      // dropped from the blend entirely rather than imputed. Inventing a
+      // keyword floor here would dilute every score by the keyword weight.
+      const combined = combiner.combineMatches([
+        semantic('a', 0.8),
+        semantic('b', 0.4),
+      ]);
+
+      const byId = new Map(combined.map((m) => [m.pattern.id, m.confidence]));
+      expect(byId.get('a')).toBeCloseTo(0.8, 5);
+      expect(byId.get('b')).toBeCloseTo(0.4, 5);
+    });
+
+    it('should report as-observed scores in metadata even when imputing for the blend', () => {
+      // The imputed floor is a ranking device. `metadata` must keep describing
+      // what each channel actually returned, or downstream consumers (the
+      // fuzzy decomposition, the MCP rationale text) will report a keyword
+      // match that never happened.
+      const combined = combiner.combineMatches([
+        semantic('solo', 0.8),
+        keyword('other', 0.1),
+      ]);
+
+      const solo = combined.find((m) => m.pattern.id === 'solo')!;
+      expect(solo.metadata.keywordScore).toBe(0);
+      expect(solo.metadata.semanticScore).toBe(0.8);
+    });
+
+    it('should preserve ordering stability when both channels agree on ranking', () => {
+      const combined = combiner.combineMatches([
+        semantic('best', 0.9),
+        keyword('best', 0.9),
+        semantic('mid', 0.5),
+        keyword('mid', 0.5),
+        semantic('worst', 0.2),
+        keyword('worst', 0.2),
+      ]);
+
+      const sorted = [...combined].sort((a, b) => b.confidence - a.confidence);
+      expect(sorted.map((m) => m.pattern.id)).toEqual(['best', 'mid', 'worst']);
+    });
+  });
 });

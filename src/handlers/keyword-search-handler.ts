@@ -7,7 +7,7 @@
  */
 
 import { DatabaseManager } from '../services/database-manager.js';
-import { BM25Scorer } from '../services/bm25-scorer.js';
+import { BM25Scorer, BM25_STOPWORDS } from '../services/bm25-scorer.js';
 import type { BM25Document } from '../services/bm25-scorer.js';
 import { structuredLogger } from '../utils/logger.js';
 import { parseTags } from '../utils/parse-tags.js';
@@ -25,6 +25,17 @@ const DEFAULT_CONFIG: KeywordSearchHandlerConfig = {
   minConfidence: 0.05,
   broadSearchThreshold: 0.01,
 };
+
+/**
+ * A lexical match alone can never be near-certain.
+ *
+ * Even with absolute BM25 normalization, a document that happens to contain
+ * every query term is still only evidence that the words co-occur — not that
+ * the pattern solves the problem. Surfacing that as 0.99 tells the caller the
+ * question is settled. Capping it below the semantic channel's practical range
+ * keeps a strong lexical hit competitive without letting it claim certainty.
+ */
+const KEYWORD_CONFIDENCE_CEILING = 0.85;
 
 export class KeywordSearchHandler implements SearchHandler {
   private db: DatabaseManager;
@@ -111,9 +122,10 @@ export class KeywordSearchHandler implements SearchHandler {
 
       const scorer = this.ensureBM25();
 
-      // BM25 scoring
+      // BM25 scoring, normalized against what this query could have scored
+      // rather than against whatever ranked first — see normalizeScoresAbsolute.
       const bm25Results = scorer.scoreQuery(request.query);
-      const normalized = scorer.normalizeScores(bm25Results);
+      const normalized = scorer.normalizeScoresAbsolute(bm25Results, request.query);
 
       // Build matches with normalized scores
       const matches: MatchResult[] = [];
@@ -130,7 +142,7 @@ export class KeywordSearchHandler implements SearchHandler {
         const pattern = this.patternMap.get(result.id);
         if (!pattern) continue;
 
-        const confidence = Math.min(Math.max(result.normalized, 0), 0.99);
+        const confidence = Math.min(Math.max(result.normalized, 0), KEYWORD_CONFIDENCE_CEILING);
 
         if (confidence >= this.config.minConfidence) {
           matches.push({
@@ -182,9 +194,9 @@ export class KeywordSearchHandler implements SearchHandler {
 
       const scorer = this.ensureBM25();
 
-      // BM25 scoring (no category filter for broad search)
+      // BM25 scoring (no category filter for broad search), absolute-normalized
       const bm25Results = scorer.scoreQuery(request.query);
-      const normalized = scorer.normalizeScores(bm25Results);
+      const normalized = scorer.normalizeScoresAbsolute(bm25Results, request.query);
 
       const matches: MatchResult[] = [];
 
@@ -192,7 +204,7 @@ export class KeywordSearchHandler implements SearchHandler {
         const pattern = this.patternMap.get(result.id);
         if (!pattern) continue;
 
-        const confidence = Math.min(Math.max(result.normalized, 0), 0.99);
+        const confidence = Math.min(Math.max(result.normalized, 0), KEYWORD_CONFIDENCE_CEILING);
 
         // Use lower threshold for broad search
         if (confidence >= this.config.broadSearchThreshold) {
@@ -252,6 +264,6 @@ export class KeywordSearchHandler implements SearchHandler {
       .toLowerCase()
       .replace(/[^\w\s]/g, ' ')
       .split(/\s+/)
-      .filter((word) => word.length > 2);
+      .filter((word) => word.length > 2 && !BM25_STOPWORDS.has(word));
   }
 }
