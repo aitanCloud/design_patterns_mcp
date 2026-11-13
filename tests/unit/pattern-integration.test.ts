@@ -13,16 +13,19 @@ import { EmbeddingServiceAdapter } from '../../src/adapters/embedding-service-ad
 
 // Mock database manager for testing
 vi.mock('../../src/services/database-manager.js', () => ({
-  DatabaseManager: vi.fn().mockImplementation(() => ({
+  DatabaseManager: vi.fn().mockImplementation(function () {
+    return {
     queryOne: vi.fn().mockReturnValue({ count: 42 }),
     getStats: vi.fn().mockReturnValue({ totalQueries: 100, databaseSize: 1024 }),
     healthCheck: vi.fn().mockReturnValue({ healthy: true, lastCheck: new Date() }),
-  })),
+    };
+  }),
 }));
 
 // Mock vector operations service
 vi.mock('../../src/services/vector-operations.js', () => ({
-  VectorOperationsService: vi.fn().mockImplementation(() => ({
+  VectorOperationsService: vi.fn().mockImplementation(function () {
+    return {
     getStats: vi.fn().mockReturnValue({
       totalVectors: 100,
       embeddingModel: 'test-model',
@@ -30,12 +33,14 @@ vi.mock('../../src/services/vector-operations.js', () => ({
     }),
     findSimilarPatterns: vi.fn().mockResolvedValue([]),
     healthCheck: vi.fn().mockReturnValue({ healthy: true, lastCheck: new Date() }),
-  })),
+    };
+  }),
 }));
 
 // Mock embedding service adapter
 vi.mock('../../src/adapters/embedding-service-adapter.js', () => ({
-  EmbeddingServiceAdapter: vi.fn().mockImplementation(() => ({
+  EmbeddingServiceAdapter: vi.fn().mockImplementation(function () {
+    return {
     isReady: vi.fn().mockResolvedValue(true),
     generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
     getStrategyInfo: vi.fn().mockReturnValue({
@@ -49,7 +54,8 @@ vi.mock('../../src/adapters/embedding-service-adapter.js', () => ({
       successCount: 5,
     }),
     healthCheck: vi.fn().mockReturnValue({ healthy: true, lastCheck: new Date() }),
-  })),
+    };
+  }),
 }));
 
 describe('Builder Pattern Integration', () => {
